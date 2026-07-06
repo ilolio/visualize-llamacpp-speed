@@ -1,4 +1,5 @@
 from llamafit.fit import (
+    Pins,
     build_recommendations,
     command_line,
     evaluate_kv_scenarios,
@@ -54,7 +55,7 @@ def test_fit_pinned_ctx_drops_layers_instead(tmp_path):
     m = _big_model(tmp_path)
     base = RunConfig(n_ctx=131072, n_gpu_layers=m.n_layer + 1)
     budget = estimate(m, base).gpu_total - 200 * MIB
-    fit = simulate_fit(m, budget, base, overhead=0, fit_ctx=4096, ctx_pinned=True)
+    fit = simulate_fit(m, budget, base, overhead=0, fit_ctx=4096, pins=Pins(ctx=True))
     assert fit.fits
     assert fit.cfg.n_ctx == 131072
     assert fit.cfg.n_gpu_layers < m.n_layer + 1
@@ -76,7 +77,7 @@ def test_fit_moe_spills_experts_before_layers(tmp_path):
     need = estimate(m, full).gpu_total
     expert_total = sum(w.expert for w in m.layer_weights)
     budget = need - expert_total // 2  # forces roughly half the experts off GPU
-    fit = simulate_fit(m, budget, full, overhead=0, fit_ctx=4096, ctx_pinned=True)
+    fit = simulate_fit(m, budget, full, overhead=0, fit_ctx=4096, pins=Pins(ctx=True))
     assert fit.fits
     assert fit.cfg.n_gpu_layers == m.n_layer + 1  # all layers stay on GPU
     assert 0 < fit.cfg.n_cpu_moe <= m.n_layer
@@ -88,7 +89,7 @@ def test_fit_moe_spills_experts_before_layers(tmp_path):
 def test_fit_impossible_budget(tmp_path):
     m = _model(tmp_path)
     base = RunConfig(n_ctx=4096, n_gpu_layers=m.n_layer + 1)
-    fit = simulate_fit(m, budget=-1, base=base, overhead=10 * MIB, ctx_pinned=True)
+    fit = simulate_fit(m, budget=-1, base=base, overhead=10 * MIB, pins=Pins(ctx=True))
     assert not fit.fits
     assert fit.cfg.n_gpu_layers == 0
 
@@ -125,6 +126,79 @@ def test_recommendations_suggest_q8_when_f16_does_not_fit(tmp_path):
     recs = build_recommendations(m, budget, base, 0, scen)
     assert "q8_0" in recs[0].title
     assert recs[0].cfg.n_ctx == 65536  # target context preserved
+
+
+def test_fit_pinned_kv_still_shrinks_ctx(tmp_path):
+    """--ctk/--ctv pinned must not disable fitting of the free dimensions."""
+    m = _big_model(tmp_path)
+    base = RunConfig(n_ctx=131072, n_gpu_layers=m.n_layer + 1)
+    budget = estimate(m, base).gpu_total - 200 * MIB
+    fit = simulate_fit(m, budget, base, overhead=0, fit_ctx=4096, pins=Pins(kv=True))
+    assert fit.fits
+    assert (fit.cfg.cache_type_k, fit.cfg.cache_type_v) == ("f16", "f16")  # pin honored
+    assert fit.cfg.n_ctx < 131072  # ctx was still fitted
+    assert any("pinned" in a for a in fit.actions)
+
+
+def test_fit_everything_pinned_reports_over_budget(tmp_path):
+    m = _big_model(tmp_path)
+    base = RunConfig(n_ctx=131072, n_gpu_layers=m.n_layer + 1)
+    budget = estimate(m, base).gpu_total - 200 * MIB
+    fit = simulate_fit(m, budget, base, overhead=0,
+                       pins=Pins(ctx=True, ngl=True, kv=True, moe=True))
+    assert not fit.fits
+    assert fit.cfg == base  # nothing was changed
+    assert any("over budget" in a for a in fit.actions)
+
+
+def test_scenarios_include_pinned_exotic_kv_type(tmp_path):
+    m = _big_model(tmp_path)
+    base = RunConfig(n_ctx=32768, n_gpu_layers=m.n_layer + 1,
+                     cache_type_k="q5_1", cache_type_v="q5_1")
+    scen = evaluate_kv_scenarios(m, budget=4 * GIB, base=base, overhead=0, max_ctx_cap=131072)
+    assert ("q5_1", "q5_1") in {(s.ctk, s.ctv) for s in scen}
+
+
+def test_recommendations_pinned_kv_fits_suggests_more_ctx(tmp_path):
+    m = _big_model(tmp_path)  # train ctx 131072
+    base = RunConfig(n_ctx=8192, n_gpu_layers=m.n_layer + 1)
+    budget = estimate(m, base).gpu_total + 2 * GIB  # plenty of headroom
+    scen = evaluate_kv_scenarios(m, budget, base, 0, max_ctx_cap=131072)
+    recs = build_recommendations(m, budget, base, 0, scen,
+                                 pins=Pins(kv=True), max_ctx_cap=131072)
+    assert all(r.cfg.cache_type_k == "f16" for r in recs)  # pin never overridden
+    more = [r for r in recs if r.cfg.n_ctx > 8192]
+    assert more, "should recommend growing -c into the VRAM headroom"
+    # maximality at CTX_STEP granularity: one step more must not fit
+    grown = more[0].cfg
+    bigger = RunConfig(**{**grown.__dict__, "n_ctx": grown.n_ctx + 256})
+    assert estimate(m, bigger).gpu_total > budget
+
+
+def test_recommendations_pinned_kv_too_big_keeps_type(tmp_path):
+    m = _big_model(tmp_path)
+    base = RunConfig(n_ctx=65536, n_gpu_layers=m.n_layer + 1)
+    cfg8 = RunConfig(n_ctx=65536, n_gpu_layers=m.n_layer + 1,
+                     cache_type_k="q8_0", cache_type_v="q8_0")
+    budget = (estimate(m, base).gpu_total + estimate(m, cfg8).gpu_total) // 2
+    scen = evaluate_kv_scenarios(m, budget, base, 0, max_ctx_cap=131072)
+    recs = build_recommendations(m, budget, base, 0, scen,
+                                 pins=Pins(kv=True), max_ctx_cap=131072)
+    assert recs
+    # q8_0 would fit but must never be suggested when KV is pinned to f16
+    assert all((r.cfg.cache_type_k, r.cfg.cache_type_v) == ("f16", "f16") for r in recs)
+    # instead: a full-offload option at a smaller context
+    assert any(r.cfg.n_ctx < 65536 and r.cfg.n_gpu_layers == m.n_layer + 1 for r in recs)
+
+
+def test_recommendations_pinned_ngl_kept(tmp_path):
+    m = _big_model(tmp_path)
+    base = RunConfig(n_ctx=8192, n_gpu_layers=8)
+    scen = evaluate_kv_scenarios(m, 6 * GIB, base, 0, max_ctx_cap=131072)
+    recs = build_recommendations(m, 6 * GIB, base, 0, scen,
+                                 pins=Pins(ngl=True), max_ctx_cap=131072)
+    assert recs
+    assert all(r.cfg.n_gpu_layers == 8 for r in recs)
 
 
 def test_command_line():

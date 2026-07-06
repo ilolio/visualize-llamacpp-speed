@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.text import Text
 
 from . import __version__
-from .fit import FitResult, build_recommendations, evaluate_kv_scenarios, simulate_fit
+from .fit import Pins, build_recommendations, evaluate_kv_scenarios, simulate_fit
 from .gguf import GGUFError, load_gguf
 from .gpu import detect_gpus, system_ram
 from .memory import GIB, MIB, RunConfig, estimate, total_kv_bytes
@@ -52,13 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
         "-c", "--ctx", type=int, default=None,
         help="target context size (default: min(training ctx, 32768))",
     )
-    p.add_argument("--ngl", type=int, default=None, help="pin -ngl instead of auto-fitting")
+    p.add_argument("--ngl", type=int, default=None,
+                   help="pin -ngl (fit & recommendations keep it and adjust the rest)")
     p.add_argument("--ctk", "--cache-type-k", dest="ctk", default=None,
-                   help="pin KV cache K type (f16, bf16, q8_0, q5_1, q5_0, q4_1, q4_0, ...)")
+                   help="pin KV cache K type (f16, bf16, q8_0, q5_1, q5_0, q4_1, q4_0, ...); "
+                        "recommendations keep it and adjust context/offload instead")
     p.add_argument("--ctv", "--cache-type-v", dest="ctv", default=None,
-                   help="pin KV cache V type")
-    p.add_argument("--n-cpu-moe", type=int, default=0,
-                   help="pin --n-cpu-moe (expert tensors of first N layers on CPU)")
+                   help="pin KV cache V type (defaults to --ctk when only that is given)")
+    p.add_argument("--n-cpu-moe", type=int, default=None,
+                   help="pin --n-cpu-moe (expert tensors of first N layers on CPU; default: 0)")
     p.add_argument("--vram", type=float, default=None, metavar="GIB",
                    help="total VRAM budget in GiB (default: auto-detect via nvidia-smi/rocm-smi/Metal)")
     p.add_argument("--fit-target", type=int, default=1024, metavar="MIB",
@@ -129,15 +131,20 @@ def main(argv: list[str] | None = None) -> int:
         args.ngl = max(0, min(args.ngl, model.n_layer + 1))
 
     # --- target context ---
-    ctx_pinned = args.ctx is not None
+    pins = Pins(
+        ctx=args.ctx is not None,
+        ngl=args.ngl is not None,
+        kv=args.ctk is not None or args.ctv is not None,
+        moe=args.n_cpu_moe is not None,
+    )
     train_ctx = model.n_ctx_train or DEFAULT_CTX_CAP
-    target_ctx = args.ctx if ctx_pinned else min(train_ctx, DEFAULT_CTX_CAP)
+    target_ctx = args.ctx if pins.ctx else min(train_ctx, DEFAULT_CTX_CAP)
 
     base = RunConfig(
         n_ctx=target_ctx,
         n_gpu_layers=args.ngl if args.ngl is not None else model.n_layer + 1,
-        n_cpu_moe=args.n_cpu_moe,
-        cache_type_k=args.ctk or "f16",
+        n_cpu_moe=args.n_cpu_moe or 0,
+        cache_type_k=args.ctk or args.ctv or "f16",
         cache_type_v=args.ctv or args.ctk or "f16",
         flash_attn=args.fa == "on",
         n_ubatch=args.ubatch,
@@ -150,18 +157,11 @@ def main(argv: list[str] | None = None) -> int:
     fit = None
     recs = []
     if budget is not None:
-        if args.ngl is not None or args.ctk or args.ctv or args.n_cpu_moe:
-            # user pinned parameters: evaluate exactly that config, like
-            # llama.cpp which disables --fit once these are set explicitly
-            est = estimate(model, base, overhead)
-            fit = FitResult(
-                fits=est.gpu_total <= budget, cfg=base, est=est, budget=budget,
-                actions=["parameters pinned by user — fit disabled (like llama.cpp)"],
-            )
-        else:
-            fit = simulate_fit(model, budget, base, overhead,
-                               fit_ctx=min(args.fit_ctx, target_ctx), ctx_pinned=ctx_pinned)
-        recs = build_recommendations(model, budget, base, overhead, scenarios)
+        # pinned parameters are held fixed; the free dimensions are fitted
+        fit = simulate_fit(model, budget, base, overhead,
+                           fit_ctx=min(args.fit_ctx, target_ctx), pins=pins)
+        recs = build_recommendations(model, budget, base, overhead, scenarios,
+                                     pins=pins, max_ctx_cap=max_ctx_cap)
 
     # --- JSON mode ---
     if args.json:

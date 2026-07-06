@@ -52,6 +52,20 @@ def test_pinned_params(tiny_llama, capsys):
     assert "pinned" in out["fit"]["actions"][0]
 
 
+def test_pinned_kv_still_fits_and_recommends(tiny_llama, capsys):
+    """--ctk/--ctv must not disable fitting; recommendations keep the type."""
+    rc = main([str(tiny_llama), "--vram", "8", "--ctk", "f16", "--ctv", "f16", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["fit"]["fits"] is True
+    assert "pinned" in out["fit"]["actions"][0]
+    assert out["fit"]["config"]["n_gpu_layers"] == 5  # -ngl still auto-fitted
+    recs = out["recommendations"]
+    assert recs
+    assert all(r["config"]["cache_type_k"] == "f16" and r["config"]["cache_type_v"] == "f16"
+               for r in recs)
+
+
 def test_ctx_flag(tiny_llama, capsys):
     rc = main([str(tiny_llama), "--vram", "8", "-c", "2048", "--json"])
     assert rc == 0
