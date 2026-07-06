@@ -460,10 +460,38 @@ def build_recommendations(
     return recs
 
 
+def _model_args(source: str) -> list[str]:
+    """Map llamafit's model argument to the matching llama.cpp flag.
+
+    Local files use ``-m``; ``-hf`` style specs (``org/repo[:QUANT]``,
+    ``hf:...``, ``hf.co/...``) use ``-hf`` (plus ``--hf-file`` for direct-file
+    specs); http(s) URLs use ``-mu``.  Mirrors ``load_gguf``'s precedence:
+    an existing local path always wins.
+    """
+    from pathlib import Path
+
+    from .gguf import parse_hf_spec
+
+    if Path(source).expanduser().exists():
+        return ["-m", source]
+    if source.startswith(("http://", "https://")):
+        return ["-mu", source]
+    if source.startswith("hf:") and source.lower().endswith(".gguf"):
+        parts = source[3:].lstrip("/").split("/")
+        if len(parts) >= 3:
+            return ["-hf", f"{parts[0]}/{parts[1]}", "--hf-file", "/".join(parts[2:])]
+    spec = parse_hf_spec(source)
+    if spec is not None:
+        repo, tag = spec
+        return ["-hf", f"{repo}:{tag}" if tag else repo]
+    return ["-m", source]
+
+
 def command_line(model_path: str, cfg: RunConfig, server: bool = True) -> str:
     """Suggested llama.cpp invocation for a config."""
     binary = "llama-server" if server else "llama-cli"
-    parts = [binary, "-m", model_path, "-c", str(cfg.n_ctx), "-ngl", str(cfg.n_gpu_layers)]
+    parts = [binary, *_model_args(model_path),
+             "-c", str(cfg.n_ctx), "-ngl", str(cfg.n_gpu_layers)]
     if cfg.flash_attn:
         parts += ["-fa", "on"]
     if (cfg.cache_type_k, cfg.cache_type_v) != ("f16", "f16"):

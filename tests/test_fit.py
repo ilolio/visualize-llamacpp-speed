@@ -210,3 +210,31 @@ def test_command_line():
     assert "--n-cpu-moe 5" in cmd
     plain = command_line("m.gguf", RunConfig(n_ctx=4096, n_gpu_layers=10))
     assert "-ctk" not in plain
+
+
+def test_command_line_model_flag_matches_source_kind(tmp_path):
+    cfg = RunConfig(n_ctx=4096, n_gpu_layers=10)
+    # -hf style specs become -hf (with and without a quant tag, hf:/hf.co/ prefixes)
+    assert command_line("unsloth/Qwen3.5-9B-GGUF:Q4_K_M", cfg).startswith(
+        "llama-server -hf unsloth/Qwen3.5-9B-GGUF:Q4_K_M ")
+    assert "-hf org/repo " in command_line("org/repo", cfg)
+    assert "-hf org/repo:Q8_0 " in command_line("hf:org/repo:Q8_0", cfg)
+    assert "-hf org/repo:Q8_0 " in command_line("hf.co/org/repo:Q8_0", cfg)
+    # direct-file hf: spec keeps the exact file
+    assert "-hf org/repo --hf-file sub/file.gguf " in command_line(
+        "hf:org/repo/sub/file.gguf", cfg)
+    # URLs become -mu
+    assert "-mu https://example.com/m.gguf " in command_line(
+        "https://example.com/m.gguf", cfg)
+    # an existing local path always wins, even if it parses as a spec
+    d = tmp_path / "org"
+    d.mkdir()
+    local = d / "repo"
+    local.write_bytes(b"")
+    import os
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        assert "-m org/repo " in command_line("org/repo", cfg)
+    finally:
+        os.chdir(cwd)
