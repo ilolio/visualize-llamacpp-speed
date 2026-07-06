@@ -1,0 +1,35 @@
+[project]
+name = "llamafit"
+version = "0.2.0"
+description = "Visualize llama.cpp memory fit and get parameter recommendations (-ngl, -c, -ctk/-ctv, --n-cpu-moe) from GGUF metadata"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "ilolio" }]
+keywords = ["llama.cpp", "gguf", "vram", "kv-cache", "llm"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["rich>=13.0"]
+
+[project.urls]
+Repository = "https://github.com/ilolio/visualize-llamacpp-speed"
+
+[project.scripts]
+llamafit = "llamafit.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llamafit"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
