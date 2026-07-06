@@ -52,7 +52,10 @@ llamafit hf:bartowski/Qwen2.5-32B-Instruct-GGUF/Qwen2.5-32B-Instruct-Q4_K_M.gguf
 # ゲート付きリポジトリは HF_TOKEN を設定
 
 # パラメータを固定して「この設定なら乗るか？」を確認
+# 固定した値は fit・推奨ともに変更されず、残りの自由なパラメータで調整される
+# （例: --ctk/--ctv を固定すると、その KV 型のまま乗る最大 ctx や -ngl を提案）
 llamafit model.gguf -c 32768 --ngl 40 --ctk q8_0 --vram 16
+llamafit model.gguf --ctk f16 --ctv f16 --vram 24   # f16 KV 固定で ctx/-ngl を推奨
 
 # スクリプト向け
 llamafit model.gguf --vram 24 --json | jq .recommendations
@@ -64,8 +67,8 @@ llamafit model.gguf --vram 24 --json | jq .recommendations
 |---|---|---|
 | `-c, --ctx` | ターゲットのコンテキスト長 | min(学習時 ctx, 32768) |
 | `--vram GIB` | VRAM 予算(GiB)。未指定なら自動検出 | 自動検出 |
-| `--ngl` | `-ngl` を固定（fit を無効化） | 自動 |
-| `--ctk / --ctv` | KV キャッシュ型を固定 (`f16` `q8_0` `q4_0` など) | f16 |
+| `--ngl` | `-ngl` を固定（他の自由なパラメータで調整） | 自動 |
+| `--ctk / --ctv` | KV キャッシュ型を固定 (`f16` `q8_0` `q4_0` など)。推奨は型を変えず ctx / `-ngl` 側で調整 | f16 |
 | `--n-cpu-moe` | 先頭 N 層のエキスパートを CPU に固定 | 0 |
 | `--fit-target MIB` | 残しておく空き VRAM（llama.cpp と同じ意味） | 1024 |
 | `--fit-ctx N` | fit シミュレーションが縮めてよい ctx の下限 | 4096 |
@@ -115,8 +118,8 @@ Recommendations
 4. **CPU RAM バー** — オフロードの結果ホスト RAM 側に乗る分（重み / KV / ホストバッファ）を、搭載 RAM の空き容量と比較。足りなければスワップ警告
 5. **レイヤーストリップ** — どの層が GPU に乗るか（MoE はエキスパートだけ CPU の層も区別）
 6. **KV キャッシュ表** — `f16` / `q8_0` / `q4_0` それぞれの KV サイズ、フルオフロードで届く最大 ctx、ターゲット ctx での最大 `-ngl`
-7. **--fit シミュレーション** — llama.cpp の自動フィット（デフォルト有効）が行う調整の予測: ①そのまま乗るか → ②ctx を縮小（`-c` 明示時はスキップ）→ ③MoE エキスパートを CPU へ → ④`-ngl` を削減
-8. **推奨設定** — ctx を守る前提でのランク付き推奨。★付きが第一候補で、コピペ可能な `llama-server` コマンド付き
+7. **--fit シミュレーション** — llama.cpp の自動フィット（デフォルト有効）が行う調整の予測: ①そのまま乗るか → ②ctx を縮小（`-c` 明示時はスキップ）→ ③MoE エキスパートを CPU へ → ④`-ngl` を削減。明示したフラグ（`-c` / `--ngl` / `--ctk`・`--ctv` / `--n-cpu-moe`）は固定され、残りの自由なパラメータだけが調整される
+8. **推奨設定** — ctx を守る前提でのランク付き推奨。★付きが第一候補で、コピペ可能な `llama-server` コマンド付き。固定したパラメータは推奨でも変更されない（例: `--ctk f16` 固定なら q8_0 は提案せず、f16 のまま乗る最大 ctx やオフロード構成を提案）
 
 ## 計算の中身と精度
 

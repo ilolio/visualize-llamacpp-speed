@@ -264,7 +264,7 @@ def kv_table(
 
     for s in scenarios:
         row = [
-            f"{s.ctk}",
+            s.ctk if s.ctk == s.ctv else f"{s.ctk}/{s.ctv}",
             fmt_bytes(s.kv_bytes_at_target),
             fmt_bytes(s.est_at_target.gpu_total),
         ]
