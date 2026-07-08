@@ -70,6 +70,7 @@ class RunConfig:
 @dataclass
 class MemEstimate:
     gpu_weights: int = 0
+    gpu_mmproj: int = 0        # multimodal projector weights (offloaded to GPU)
     gpu_kv: int = 0
     gpu_compute: int = 0
     gpu_overhead: int = 0      # runtime/context allocations (CUDA context etc.)
@@ -81,7 +82,7 @@ class MemEstimate:
 
     @property
     def gpu_total(self) -> int:
-        return self.gpu_weights + self.gpu_kv + self.gpu_compute + self.gpu_overhead
+        return self.gpu_weights + self.gpu_mmproj + self.gpu_kv + self.gpu_compute + self.gpu_overhead
 
     @property
     def cpu_total(self) -> int:
@@ -166,6 +167,14 @@ def estimate(model: ModelInfo, cfg: RunConfig, overhead_bytes: int = 0) -> MemEs
     else:
         est.cpu_weights += model.output_bytes
 
+    # multimodal projector: a fixed allocation, independent of -ngl / ctx / KV.
+    # llama.cpp offloads the vision/audio encoder to GPU by default.
+    if model.mmproj_bytes:
+        if model.mmproj_on_gpu:
+            est.gpu_mmproj += model.mmproj_bytes
+        else:
+            est.cpu_weights += model.mmproj_bytes
+
     # KV cache follows its layer's device
     for i in range(model.n_layer):
         b = layer_kv_bytes(model, i, cfg.n_ctx, cfg.cache_type_k, cfg.cache_type_v, cfg.n_ubatch)
@@ -195,4 +204,10 @@ def estimate(model: ModelInfo, cfg: RunConfig, overhead_bytes: int = 0) -> MemEs
         )
     if model.mla:
         est.notes.append("MLA latent KV cache (deepseek2-style): V cache is folded into K")
+    if model.mmproj_bytes:
+        where = "GPU" if model.mmproj_on_gpu else "CPU"
+        est.notes.append(
+            f"multimodal projector weights included on {where}; the vision/audio encoder "
+            "also uses a compute buffer (image-size dependent) not counted here"
+        )
     return est

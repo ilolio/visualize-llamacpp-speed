@@ -19,6 +19,7 @@ from .memory import GIB, MIB, MemEstimate, RunConfig, total_kv_bytes
 from .model import ModelInfo
 
 C_WEIGHTS = "#3987e5"   # blue
+C_MMPROJ = "#9b6dd6"    # purple (multimodal projector)
 C_KV = "#199e70"        # aqua
 C_COMPUTE = "#c98500"   # yellow
 C_OVERHEAD = "#8a8983"  # grey
@@ -103,6 +104,10 @@ def model_panel(model: ModelInfo) -> Panel:
     t.add_row("embd / ffn", f"{model.n_embd} / {model.n_ff}", "train ctx", f"{model.n_ctx_train:,}")
     if extras:
         t.add_row("features", " · ".join(extras), "", "")
+    if model.mmproj_bytes:
+        where = "GPU" if model.mmproj_on_gpu else "CPU"
+        t.add_row("mmproj", f"{fmt_bytes(model.mmproj_bytes)} projector → {where}",
+                  "multimodal", "vision/audio encoder")
     return Panel(t, title=f"[bold]{model.name}[/bold]", border_style="dim", expand=False)
 
 
@@ -177,10 +182,12 @@ def budget_section(
 def requirement_section(model: ModelInfo, cfg: RunConfig, budget: int | None) -> Group:
     """Raw demand of the model itself: weights + KV cache, before any offload."""
     weights = model.weight_bytes_total
+    mmproj = model.mmproj_bytes
     kv = total_kv_bytes(model, cfg)
-    total = weights + kv
+    total = weights + mmproj + kv
     segments = [
         ("weights", weights, C_WEIGHTS),
+        ("mmproj", mmproj, C_MMPROJ),
         (f"KV {cfg.cache_type_k}", kv, C_KV),
     ]
     header = Text()
@@ -189,8 +196,9 @@ def requirement_section(model: ModelInfo, cfg: RunConfig, budget: int | None) ->
     header.append("@ ctx ")
     header.append(f"{cfg.n_ctx:,}", style=f"bold {C_KV}")
     header.append("   ")
+    mmproj_str = f"mmproj {fmt_bytes(mmproj)} + " if mmproj else ""
     header.append(
-        f"weights {fmt_bytes(weights)} + KV {cfg.cache_type_k} {fmt_bytes(kv)} "
+        f"weights {fmt_bytes(weights)} + {mmproj_str}KV {cfg.cache_type_k} {fmt_bytes(kv)} "
         f"= {fmt_bytes(total)}"
     )
     lines: list[Text | str] = [header]
@@ -199,7 +207,7 @@ def requirement_section(model: ModelInfo, cfg: RunConfig, budget: int | None) ->
         marker_pos = round(budget / total * BAR_WIDTH)
         lines.append(Text(" " * max(0, marker_pos - 1) + f"▲ budget {fmt_bytes(budget)}",
                           style=C_OVER))
-    legend = _legend(segments)
+    legend = _legend([s for s in segments if s[1] > 0])
     if budget is not None and total <= budget:
         legend.append("   ")
         legend.append("░ ", style=C_FREE)
@@ -214,6 +222,7 @@ def vram_section(
 ) -> Group:
     segments = [
         ("weights", est.gpu_weights, C_WEIGHTS),
+        ("mmproj", est.gpu_mmproj, C_MMPROJ),
         (f"KV {cfg.cache_type_k}", est.gpu_kv, C_KV),
         ("compute*", est.gpu_compute, C_COMPUTE),
         ("overhead", est.gpu_overhead, C_OVERHEAD),
@@ -379,7 +388,8 @@ def fit_panel(fit: FitResult) -> Panel:
 
 
 def recommendation_panels(
-    recs: list[Recommendation], model_path: str, budget: int
+    recs: list[Recommendation], model_path: str, budget: int,
+    mmproj: str | None = None, mmproj_offload: bool = True,
 ) -> list[Panel]:
     panels = []
     for i, rec in enumerate(recs):
@@ -393,7 +403,7 @@ def recommendation_panels(
             est_line.append("    CPU RAM ", style="bold")
             est_line.append(fmt_bytes(rec.est.cpu_total))
         body.append(est_line)
-        cmd = command_line(model_path, rec.cfg)
+        cmd = command_line(model_path, rec.cfg, mmproj=mmproj, mmproj_offload=mmproj_offload)
         body.append(Text(f"$ {cmd}", style="bold cyan"))
         title = f"★ {rec.title}" if i == 0 else rec.title
         panels.append(

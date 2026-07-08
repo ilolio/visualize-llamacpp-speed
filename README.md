@@ -70,6 +70,9 @@ llamafit model.gguf --vram 24 --json | jq .recommendations
 | `--ngl` | `-ngl` を固定（他の自由なパラメータで調整） | 自動 |
 | `--ctk / --ctv` | KV キャッシュ型を固定 (`f16` `q8_0` `q4_0` など)。推奨は型を変えず ctx / `-ngl` 側で調整 | f16 |
 | `--n-cpu-moe` | 先頭 N 層のエキスパートを CPU に固定 | 0 |
+| `--mmproj SRC` | マルチモーダル投影器（mmproj）の GGUF を明示指定（パス / URL / `hf:org/repo/file.gguf`）。未指定でも自動検出 | 自動検出 |
+| `--no-mmproj` | mmproj の自動検出・計上をしない | — |
+| `--no-mmproj-offload` | mmproj を GPU ではなく CPU に置く（llama.cpp と同じ） | — |
 | `--fit-target MIB` | 残しておく空き VRAM（llama.cpp と同じ意味） | 1024 |
 | `--fit-ctx N` | fit シミュレーションが縮めてよい ctx の下限 | 4096 |
 | `--overhead MIB` | CUDA コンテキスト等のランタイムオーバーヘッド見積り | 500 |
@@ -130,6 +133,7 @@ Recommendations
 - **重み**: GGUF のテンソルテーブルから正確に算出。`token_embd` は常に CPU、`-ngl` は最後の N ブロック + 出力層（`ngl > n_layer` のとき）という llama.cpp の配置を再現
 - **KV キャッシュ**: `ctx × Σ層 (K次元 × K型のbytes/elem + V次元 × V型のbytes/elem)`。GQA の per-layer KV ヘッド数、SWA 層（gemma2/3, gpt-oss, cohere2 等は窓+マイクロバッチ分のみ）、deepseek2 系 MLA（潜在 KV、V キャッシュなし）に対応
 - **計算バッファ**: 見積り（±15% 程度）。ロジット（`n_vocab × n_ubatch × f32`）、FA 無効時の KQ 行列、FFN 活性が主成分。だからこそ llama.cpp と同じく `--fit-target` の安全マージンを確保します
+- **mmproj（マルチモーダル投影器）**: 別ファイルの `mmproj-*.gguf`（vision/audio エンコーダ）を自動検出し、その重みを VRAM に計上します（ローカルは同ディレクトリの兄弟ファイル、`-hf` はリポジトリ内のファイルを llama.cpp と同じく自動選択）。llama.cpp のデフォルトに合わせて GPU に配置（`--no-mmproj-offload` で CPU）。重みは GGUF から正確に算出しますが、エンコーダ自身の計算バッファ（画像サイズ依存）は含みません。`--no-mmproj` で無効化できます
 - **KV 量子化の推奨**: `q8_0` は実用上ほぼ無劣化で KV 半減。`q4_0` はさらに半分になるが品質低下と長 ctx での速度低下があるため、第一候補には出しません。fused Flash Attention の速いカーネルを使うため **K/V は同じ型**（対称）を推奨します
 
 ## 開発

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import sys
 
 from rich.console import Console
@@ -12,7 +13,7 @@ from rich.text import Text
 
 from . import __version__
 from .fit import Pins, build_recommendations, evaluate_kv_scenarios, simulate_fit
-from .gguf import GGUFError, load_gguf
+from .gguf import GGUFError, discover_mmproj, load_gguf, load_mmproj
 from .gpu import detect_gpus, system_ram
 from .memory import GIB, MIB, RunConfig, estimate, total_kv_bytes
 from .model import extract_model_info
@@ -62,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="pin KV cache V type (defaults to --ctk when only that is given)")
     p.add_argument("--n-cpu-moe", type=int, default=None,
                    help="pin --n-cpu-moe (expert tensors of first N layers on CPU; default: 0)")
+    p.add_argument("--mmproj", default=None, metavar="SRC",
+                   help="multimodal projector GGUF (path, https:// URL, or hf:org/repo/file.gguf) "
+                        "to include in the VRAM math; auto-detected otherwise")
+    p.add_argument("--no-mmproj", action="store_true",
+                   help="do not auto-detect or include a multimodal projector")
+    p.add_argument("--no-mmproj-offload", action="store_true",
+                   help="keep the multimodal projector on CPU (llama.cpp --no-mmproj-offload)")
     p.add_argument("--vram", type=float, default=None, metavar="GIB",
                    help="total VRAM budget in GiB (default: auto-detect via nvidia-smi/rocm-smi/Metal)")
     p.add_argument("--fit-target", type=int, default=1024, metavar="MIB",
@@ -102,6 +110,20 @@ def main(argv: list[str] | None = None) -> int:
         err.print(f"[red]error:[/red] {args.model} has no usable hyperparameters "
                   f"(arch={model.arch!r}) — is this an mmproj/adapter file?")
         return 1
+
+    # --- multimodal projector (mmproj): a separate GGUF loaded alongside the
+    # model.  Explicit --mmproj wins; otherwise auto-detect a sibling / repo file. ---
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    mmproj_source = args.mmproj
+    if mmproj_source is None and not args.no_mmproj:
+        mmproj_source = discover_mmproj(args.model, token)
+    if mmproj_source is not None:
+        try:
+            model.mmproj_name, model.mmproj_bytes, _ = load_mmproj(mmproj_source)
+            model.mmproj_source = mmproj_source
+            model.mmproj_on_gpu = not args.no_mmproj_offload
+        except GGUFError as e:
+            err.print(f"[yellow]warning:[/yellow] could not read mmproj {mmproj_source!r}: {e}")
 
     # --- resolve budget ---
     gpus = detect_gpus()
@@ -176,6 +198,12 @@ def main(argv: list[str] | None = None) -> int:
                 "n_expert": model.n_expert, "moe": model.is_moe,
                 "swa_window": model.swa_window, "mla": model.mla,
                 "weight_bytes_total": model.weight_bytes_total,
+                "mmproj": None if not model.mmproj_bytes else {
+                    "name": model.mmproj_name,
+                    "source": model.mmproj_source,
+                    "weight_bytes": model.mmproj_bytes,
+                    "on_gpu": model.mmproj_on_gpu,
+                },
             },
             "budget": {
                 "bytes": budget,
@@ -189,8 +217,10 @@ def main(argv: list[str] | None = None) -> int:
             "target_ctx": target_ctx,
             "requirement": {
                 "weights_bytes": model.weight_bytes_total,
+                "mmproj_bytes": model.mmproj_bytes,
                 "kv_bytes": total_kv_bytes(model, base),
-                "total_bytes": model.weight_bytes_total + total_kv_bytes(model, base),
+                "total_bytes": (model.weight_bytes_total + model.mmproj_bytes
+                                + total_kv_bytes(model, base)),
                 "ctx": base.n_ctx,
                 "cache_type_k": base.cache_type_k,
                 "cache_type_v": base.cache_type_v,
@@ -257,7 +287,8 @@ def main(argv: list[str] | None = None) -> int:
     if recs:
         console.print()
         console.print(Text("Recommendations", style="bold underline"))
-        for panel in recommendation_panels(recs, args.model, budget):
+        for panel in recommendation_panels(recs, args.model, budget,
+                                            model.mmproj_source or None, model.mmproj_on_gpu):
             console.print(panel)
 
     if budget is None:
