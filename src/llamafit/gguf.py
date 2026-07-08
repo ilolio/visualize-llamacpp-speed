@@ -344,6 +344,29 @@ def _gguf_is_model_file(name: str) -> bool:
     return "mmproj" not in low and "imatrix" not in low and "mtp-" not in low
 
 
+def _is_mmproj_file(name: str) -> bool:
+    low = name.lower()
+    return low.endswith(".gguf") and "mmproj" in low
+
+
+def pick_hf_mmproj(files: list[str]) -> str | None:
+    """Pick the multimodal projector GGUF from a repo listing, if present.
+
+    llama.cpp's ``-hf`` auto-selects the ``mmproj`` file for multimodal repos.
+    Full-precision projectors (f16/bf16/f32) are preferred over quantized ones,
+    matching llama.cpp's default choice.
+    """
+    cands = [f for f in files if _is_mmproj_file(f) and _first_shard_or_single(f)]
+    if not cands:
+        return None
+    cands.sort()
+    for pref in ("f16", "bf16", "f32"):
+        for c in cands:
+            if pref in c.lower():
+                return c
+    return cands[0]
+
+
 def _first_shard_or_single(name: str) -> bool:
     m = SHARD_RE.search(name)
     return m is None or int(m.group(1)) == 1
@@ -472,3 +495,67 @@ def load_gguf(source: str) -> GGUFFile:
             version, metadata = v, md
         tensors.extend(ts)
     return GGUFFile(str(shards[0]), version, metadata, tensors, total_size, n_shards=len(shards))
+
+
+# resolve/main URL for a Hugging Face repo file, e.g.
+# https://huggingface.co/org/repo/resolve/main/model.gguf
+_HF_RESOLVE_RE = re.compile(r"^https?://huggingface\.co/([^/]+/[^/]+)/resolve/[^/]+/")
+
+
+def _hf_repo_from_url(url: str) -> str | None:
+    m = _HF_RESOLVE_RE.match(url)
+    return m.group(1) if m else None
+
+
+def _local_sibling_mmproj(model_path: Path) -> str | None:
+    matches = [
+        p for p in model_path.parent.glob("*.gguf")
+        if _is_mmproj_file(p.name) and _first_shard_or_single(p.name)
+    ]
+    if not matches:
+        return None
+    names = sorted(p.name for p in matches)
+    chosen = pick_hf_mmproj(names) or names[0]
+    return str(model_path.parent / chosen)
+
+
+def discover_mmproj(source: str, token: str | None = None) -> str | None:
+    """Locate the multimodal projector that pairs with ``source``.
+
+    Returns a value loadable by :func:`load_gguf` (a local path or a URL), or
+    ``None`` when no projector is found.  Mirrors how llama.cpp obtains the
+    projector: alongside a local model file, or from the same Hugging Face repo
+    for ``-hf`` style specs and ``hf:``/``https://huggingface.co`` URLs.
+    """
+    path = Path(source).expanduser()
+    if path.exists():
+        return _local_sibling_mmproj(path)
+
+    spec = parse_hf_spec(source)
+    repo = spec[0] if spec else None
+    if repo is None:
+        url = _normalize_url(source)
+        if url is not None:
+            repo = _hf_repo_from_url(url)
+    if repo is None:
+        return None
+    try:
+        files = _hf_list_repo_files(repo, token)
+    except GGUFError:
+        return None
+    chosen = pick_hf_mmproj(files)
+    if chosen is None:
+        return None
+    return f"https://huggingface.co/{repo}/resolve/main/{quote(chosen)}"
+
+
+def load_mmproj(source: str) -> tuple[str, int, int]:
+    """Load a projector GGUF and return ``(name, weight_bytes, n_tensors)``.
+
+    ``weight_bytes`` is the exact on-disk tensor total — everything the
+    projector loads into memory.
+    """
+    g = load_gguf(source)
+    weight_bytes = sum(t.nbytes for t in g.tensors)
+    name = g.get("general.name") or Path(source).name
+    return str(name), weight_bytes, len(g.tensors)

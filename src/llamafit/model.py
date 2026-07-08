@@ -92,6 +92,12 @@ class ModelInfo:
     embd_bytes: int = 0           # token_embd — always on CPU in llama.cpp
     output_bytes: int = 0         # output head + final norm — offloaded when ngl > n_layer
 
+    # multimodal projector (a separate mmproj GGUF), loaded alongside the model
+    mmproj_bytes: int = 0         # projector weight bytes (0 = no projector)
+    mmproj_name: str = ""         # display name / filename of the projector
+    mmproj_source: str = ""       # loadable path/URL, for the suggested command
+    mmproj_on_gpu: bool = True     # llama.cpp offloads the encoder to GPU by default
+
     @property
     def is_moe(self) -> bool:
         return self.n_expert > 1

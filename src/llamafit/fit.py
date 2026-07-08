@@ -487,11 +487,24 @@ def _model_args(source: str) -> list[str]:
     return ["-m", source]
 
 
-def command_line(model_path: str, cfg: RunConfig, server: bool = True) -> str:
-    """Suggested llama.cpp invocation for a config."""
+def command_line(
+    model_path: str, cfg: RunConfig, server: bool = True,
+    mmproj: str | None = None, mmproj_offload: bool = True,
+) -> str:
+    """Suggested llama.cpp invocation for a config.
+
+    A local ``mmproj`` path is emitted as ``--mmproj``; for ``-hf`` specs the
+    projector is downloaded automatically, so it is left off there.
+    """
+    from pathlib import Path
+
     binary = "llama-server" if server else "llama-cli"
     parts = [binary, *_model_args(model_path),
              "-c", str(cfg.n_ctx), "-ngl", str(cfg.n_gpu_layers)]
+    if mmproj and Path(mmproj).expanduser().exists():
+        parts += ["--mmproj", mmproj]
+        if not mmproj_offload:
+            parts.append("--no-mmproj-offload")
     if cfg.flash_attn:
         parts += ["-fa", "on"]
     if (cfg.cache_type_k, cfg.cache_type_v) != ("f16", "f16"):
