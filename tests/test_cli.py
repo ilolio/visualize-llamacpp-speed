@@ -32,6 +32,45 @@ def test_terminal_output(tiny_llama, capsys):
     assert "llama-server" in out
 
 
+def test_budget_section_multi_gpu(tiny_llama, capsys, monkeypatch):
+    from llamafit.gpu import GPU
+    from llamafit.memory import GIB
+
+    monkeypatch.setattr("llamafit.cli.detect_gpus", lambda: [
+        GPU("GPU-A", 24 * GIB, 22 * GIB, "cuda"),
+        GPU("GPU-B", 24 * GIB, 20 * GIB, "cuda"),
+    ])
+    rc = main([str(tiny_llama)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # budget formula shows before the memory bars
+    assert "VRAM budget" in out
+    assert out.index("VRAM budget") < out.index("Model memory needed")
+    # total / used / free VRAM, pooled across both GPUs
+    assert "total 48.00 GiB" in out
+    assert "used 6.00 GiB" in out
+    assert "free 42.00 GiB" in out
+    assert "2 GPUs pooled" in out
+
+
+def test_budget_json_vram_aggregate(tiny_llama, capsys, monkeypatch):
+    from llamafit.gpu import GPU
+    from llamafit.memory import GIB
+
+    monkeypatch.setattr("llamafit.cli.detect_gpus", lambda: [
+        GPU("GPU-A", 24 * GIB, 22 * GIB, "cuda"),
+        GPU("GPU-B", 24 * GIB, 20 * GIB, "cuda"),
+    ])
+    rc = main([str(tiny_llama), "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    b = out["budget"]
+    assert b["vram_total_bytes"] == 48 * 1024**3
+    assert b["vram_used_bytes"] == 6 * 1024**3
+    assert b["vram_free_bytes"] == 42 * 1024**3
+    assert b["fit_target_bytes"] == 1024 * 1024**2
+
+
 def test_no_budget_still_works(tiny_llama, capsys, monkeypatch):
     monkeypatch.setattr("llamafit.cli.detect_gpus", lambda: [])
     rc = main([str(tiny_llama)])

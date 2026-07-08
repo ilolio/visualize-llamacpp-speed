@@ -17,6 +17,7 @@ from .gpu import detect_gpus, system_ram
 from .memory import GIB, MIB, RunConfig, estimate, total_kv_bytes
 from .model import extract_model_info
 from .render import (
+    budget_section,
     fit_panel,
     fmt_bytes,
     kv_table,
@@ -176,8 +177,15 @@ def main(argv: list[str] | None = None) -> int:
                 "swa_window": model.swa_window, "mla": model.mla,
                 "weight_bytes_total": model.weight_bytes_total,
             },
-            "budget": {"bytes": budget, "note": budget_note,
-                       "gpus": [dataclasses.asdict(g) for g in gpus]},
+            "budget": {
+                "bytes": budget,
+                "note": budget_note,
+                "fit_target_bytes": args.fit_target * MIB,
+                "vram_total_bytes": sum(g.total for g in gpus) if gpus else None,
+                "vram_used_bytes": sum(g.total - g.free for g in gpus) if gpus else None,
+                "vram_free_bytes": sum(g.free for g in gpus) if gpus else None,
+                "gpus": [dataclasses.asdict(g) for g in gpus],
+            },
             "target_ctx": target_ctx,
             "requirement": {
                 "weights_bytes": model.weight_bytes_total,
@@ -207,6 +215,10 @@ def main(argv: list[str] | None = None) -> int:
     # --- render ---
     console.print()
     console.print(model_panel(model))
+
+    # VRAM budget formula + total / used / free VRAM (multiple GPUs pooled)
+    console.print()
+    console.print(budget_section(gpus, budget, args.fit_target, args.vram))
 
     display_cfg = fit.cfg if fit is not None else base
     display_est = fit.est if fit is not None else estimate(model, base, overhead)

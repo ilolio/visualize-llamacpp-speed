@@ -14,6 +14,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .fit import FitResult, KVScenario, Recommendation, command_line
+from .gpu import GPU
 from .memory import GIB, MIB, MemEstimate, RunConfig, total_kv_bytes
 from .model import ModelInfo
 
@@ -105,6 +106,74 @@ def model_panel(model: ModelInfo) -> Panel:
     return Panel(t, title=f"[bold]{model.name}[/bold]", border_style="dim", expand=False)
 
 
+def budget_section(
+    gpus: list[GPU],
+    budget: int | None,
+    fit_target_mib: int,
+    vram_override: float | None,
+) -> Group:
+    """How the VRAM budget is derived, with the total / used / free VRAM it comes from.
+
+    Sits near the top so the numbers every later bar is measured against are
+    visible up front. Multiple GPUs are pooled (sum of total / free).
+    """
+    lines: list[Text | str] = []
+    header = Text()
+    header.append("VRAM budget  ", style="bold")
+
+    if gpus:
+        total = sum(g.total for g in gpus)
+        free = sum(g.free for g in gpus)
+        used = total - free
+        # budget = free VRAM − fit-target reserve
+        header.append(fmt_bytes(free), style=f"bold {C_KV}")
+        header.append(" free − ")
+        header.append(f"{fit_target_mib} MiB", style=C_OVERHEAD)
+        header.append(" fit-target = ")
+        header.append(fmt_bytes(budget if budget is not None else free), style="bold")
+        header.append(" budget")
+        lines.append(header)
+
+        vram = Text()
+        vram.append("  VRAM  ", style="dim")
+        vram.append("total ", style="dim")
+        vram.append(fmt_bytes(total), style="bold")
+        vram.append("   used ", style="dim")
+        vram.append(fmt_bytes(used), style=f"bold {C_OVER}")
+        vram.append("   free ", style="dim")
+        vram.append(fmt_bytes(free), style=f"bold {C_KV}")
+        if len(gpus) > 1:
+            vram.append(f"   ·  {len(gpus)} GPUs pooled", style="dim")
+        lines.append(vram)
+
+        if len(gpus) > 1:
+            for g in gpus:
+                row = Text("    ")
+                row.append(f"{g.name}", style="default")
+                row.append(
+                    f"  total {fmt_bytes(g.total)}, used {fmt_bytes(g.total - g.free)}, "
+                    f"free {fmt_bytes(g.free)}",
+                    style="dim",
+                )
+                lines.append(row)
+            lines.append(Text("  actual split depends on --tensor-split", style="dim"))
+    elif vram_override is not None:
+        header.append(f"{vram_override:g} GiB", style="bold")
+        header.append(" --vram − ")
+        header.append(f"{fit_target_mib} MiB", style=C_OVERHEAD)
+        header.append(" fit-target = ")
+        header.append(fmt_bytes(budget if budget is not None else 0), style="bold")
+        header.append(" budget")
+        lines.append(header)
+        lines.append(Text("  no GPU probed — using the --vram value as total VRAM", style="dim"))
+    else:
+        header.append("no GPU detected", style=f"bold {C_OVER}")
+        header.append(" — pass --vram <GiB> to enable fit simulation", style="dim")
+        lines.append(header)
+
+    return Group(*lines)
+
+
 def requirement_section(model: ModelInfo, cfg: RunConfig, budget: int | None) -> Group:
     """Raw demand of the model itself: weights + KV cache, before any offload."""
     weights = model.weight_bytes_total
@@ -116,8 +185,12 @@ def requirement_section(model: ModelInfo, cfg: RunConfig, budget: int | None) ->
     ]
     header = Text()
     header.append("Model memory needed  ", style="bold")
+    # Lead with the context premise: KV size below is meaningless without it.
+    header.append("@ ctx ")
+    header.append(f"{cfg.n_ctx:,}", style=f"bold {C_KV}")
+    header.append("   ")
     header.append(
-        f"weights {fmt_bytes(weights)} + KV {fmt_bytes(kv)} @ ctx {cfg.n_ctx:,} "
+        f"weights {fmt_bytes(weights)} + KV {cfg.cache_type_k} {fmt_bytes(kv)} "
         f"= {fmt_bytes(total)}"
     )
     lines: list[Text | str] = [header]
